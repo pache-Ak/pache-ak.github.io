@@ -45,18 +45,19 @@ stateDiagram-v2
 state if_ignore <<choice>>
 state if_having <<choice>>
 state if_block <<choice>>
-    [*] --> 产生 : 信号发送
+state if_ignore2 <<choice>>
+
     产生 --> if_ignore
-    if_ignore --> 丢弃 : SIG_IGN
+    if_ignore --> 丢弃 : 忽略
     if_ignore --> if_having : 捕获 默认
-    if_having --> 丢弃 : pending中已有
     if_having --> 加入pending : pending中没有
+    if_having --> 丢弃 : pending中已有
     加入pending --> if_block
-    if_block --> 等待:SIG_BLK
-    if_block --> 递达:!SIG_BLK
-    丢弃 --> [*]
+    if_block --> 等待:屏蔽
+    if_block --> if_ignore2:没有屏蔽
+    if_ignore2 --> 递达:捕获
+    if_ignore2 --> 丢弃:忽略
     等待 --> if_block
-    递达 --> [*]
 ```
 
 ### 标准信号的基本特性
@@ -218,30 +219,6 @@ sequenceDiagram
 
 附录[信号捕捉验证程序与操作流程](#信号捕捉验证程序与操作流程)提供了程序和操作流程可观察到上述特性。
 
-### 信号忽略
-
-设置信号处理程序为`SIG_IGN`的信号会被内核直接丢弃，不会唤醒进程。
-
-很多文章里会说,设置信号处理程序为`SIG_IGN`等价于设置为一个空函数,实际上它们有本质区别:
-
-- 被忽略的信号不会被内核递送
-- 不会唤醒睡眠进程和执行信号处理程序.
-
-```mermaid
-sequenceDiagram
-    participant Sender as 发送者
-    participant Kernel as 内核
-    participant Process as 目标进程
-
-    Note over Sender, Process: 场景 忽略信号(SIG_IGN)
-    Sender->>Kernel: 发送信号
-    Kernel->>Kernel: 检查处理方式=SIG_IGN
-    Kernel-->>Kernel: 直接丢弃信号
-    Note over Process: 进程无感知，继续运行
-```
-
-附录[信号忽略验证程序与操作流程](#信号忽略验证程序与操作流程)提供了程序和操作流程可观察到上述特性。
-
 ### 信号屏蔽
 
 单线程程序通过调用 `sigprocmask` 获取和/或更改调用线程的信号掩码。
@@ -311,6 +288,39 @@ sequenceDiagram
 
 附录[信号屏蔽验证程序与操作流程](#信号屏蔽验证程序与操作流程)提供了程序和操作流程可观察到上述特性。
 
+### 信号忽略
+
+设置信号处理程序为`SIG_IGN`的信号会被内核直接丢弃，不会唤醒进程。
+
+很多文章里会说,设置信号处理程序为`SIG_IGN`等价于设置为一个空函数,实际上它们有本质区别:
+
+- 被忽略的信号不会被内核递送
+- 不会唤醒睡眠进程和执行信号处理程序.
+
+若一个信号已经在加入了pending，此时设置对应的信号处理为忽略`SIG_IGN`会发生什么？
+
+标准规定：如果一个信号在处理动作被设置为`SIG_IGN`时正处于未决（Pending）状态，那么当它最终被递达（Delivery）时，内核会检查其当前动作，并因动作为`SIG_IGN`而将其直接丢弃。
+
+```mermaid
+sequenceDiagram
+    participant Sender as 发送者
+    participant Kernel as 内核
+    participant Process as 目标进程
+
+    Note over Sender, Process: 场景 忽略已Pending的信号
+    Process->>Process:屏蔽信号SIGXXX
+    Sender->>Kernel: 发送信号SIGXXX
+    Kernel->>Kernel: 信号加入pending队列
+    Process->>Process: 设置信号处理为SIG_IGN
+    Process->>Kernel: 从内核返回(递送信号时刻)
+    Kernel->>Kernel: 检查信号动作=SIG_IGN, 从pending中移除并丢弃信号
+    Sender->>Kernel: 发送信号
+    Kernel->>Kernel: 检查处理方式=SIG_IGN,直接丢弃信号
+    Note over Process: 进程无感知，继续运行
+```
+
+附录[信号忽略验证程序与操作流程](#信号忽略验证程序与操作流程)提供了程序和操作流程可观察到上述特性。
+
 ## 本章小结
 
 本章介绍了标准信号的基础概念，核心内容包括:
@@ -374,29 +384,6 @@ $ ps  -o pid,tid,stat,pending,blocked,ignored,caught  -p $(pgrep -x "SigCgt")
 # 会话1:继续程序(按Enter)结束程序
 ```
 
-### 信号忽略验证程序与操作流程
-
-点击[SigIgn.c](/code/signal/SigIgn.c)获取信号忽略验证程序.
-
-```bash
-# 会话1:运行程序
-$ ./SigIgn
-Ignore signal SIGSEGV and pause.
-You can try sending the SIGSEGV signal to see if the process is awakened.
-Enter Ctrl+C to quit process.
-# 会话2:检查进程状态
-$ ps  -o pid,tid,stat,pending,blocked,ignored,caught  -p $(pgrep -x "SigIgn")
-    PID     TID STAT          PENDING          BLOCKED          IGNORED           CAUGHT
- 344554  344554 S+   0000000000000000 0000000000000000  0000000000000400 0000000000000000
-# 会话2:发送信号
-$ kill -SIGSEGV  $(pgrep -x "SigIgn")
-# 会话2:检查进程状态 观察到程序没有被唤醒，依旧睡眠，也没有信号进入pending。
- ps  -o pid,tid,stat,pending,blocked,ignored,caught  -p $(pgrep -x "SigIgn")
-    PID     TID STAT          PENDING          BLOCKED          IGNORED           CAUGHT
- 345660  345660 S+   0000000000000000 0000000000000000  0000000000000400 0000000000000000
-# 会话1:结束程序(按Ctrl+C)
-```
-
 ### 信号屏蔽验证程序与操作流程
 
 点击[SigBlk.c](/code/signal/SigBlk.c)获取信号屏蔽验证程序.
@@ -425,6 +412,29 @@ $ ps -o pid,tid,stat,pending,blocked,ignored,caught -p $(pgrep -x "SigBlk")
     PID     TID STAT          PENDING          BLOCKED          IGNORED           CAUGHT
  376571  376571 S+   0000000000000000 0000000000000000 0000000000000000 0000000000002000
 # 会话1:继续程序(按Enter结束)
+```
+
+### 信号忽略验证程序与操作流程
+
+点击[SigIgn.c](/code/signal/SigIgn.c)获取信号忽略验证程序.
+
+```bash
+# 会话1:运行程序
+$ ./SigIgn
+Install a signal handle for SIGUSR1.
+# 会话2:发送多次SIGUSR1信号
+$ kill -SIGUSR1 $(pgrep -x "SigIgn")
+$ kill -SIGUSR1 $(pgrep -x "SigIgn")
+# 会话1:继续程序(按Ctrl+D)结束当前信号处理,观察到只处理了一个信号
+Set the SIGUSR1 signal handling method to ignore., press Ctrl+D continue.
+press Ctrl+C to quit
+# 会话2:发送多次SIGUSR1信号,
+$ kill -SIGUSR1 $(pgrep -x "SigIgn")
+# 会话2:检查进程状态 观察到程序没有被唤醒，依旧睡眠，也没有信号进入pending。
+ ps  -o pid,tid,stat,pending,blocked,ignored,caught  -p $(pgrep -x "SigIgn")
+    PID     TID STAT          PENDING          BLOCKED          IGNORED           CAUGHT
+ 345660  345660 S+   0000000000000000 0000000000000000  0000000000000200 0000000000000000
+# 会话1:继续程序(按Ctrl+C结束)
 ```
 
 ## see also
